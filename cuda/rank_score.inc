@@ -13,4 +13,5 @@ __constant__ double RANK_FOUND_WEIGHT[5] = {-2.88006154, 6.38675029, 27.5510387,
 __constant__ double RANK_EVENNESS_WEIGHT[5] = {98.1182518, 184.736606, 153.385144, 137.727257, 127.496804};   // times the evenness
 __constant__ double RANK_SINGLES_WEIGHT[5] = {-2.76963653, -1.98727175, -7.98260665, -2.56354141, 9.11513901};   // Gets multiplied by the share of biomes that showed up once
 __constant__ double RANK_BIAS[5] = {-77.1113393, -211.116316, -219.48895, -212.27205, -210.995215};
-__constant__ double RANK_THRESHOLD[5] = {0.0512794077, 10.0, 16.0, 19.0, 20.0};
+// Levels 2 to 5 used 10, 16, 19 and 20 for every hit from SENTS 0.910 up. The hunt for the best seeds uses these
+__constant__ double RANK_THRESHOLD[5] = {0.0512794077, 16.0, 22.0, 25.0, 26.0};

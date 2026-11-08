@@ -1,6 +1,8 @@
 # Makefile for JUNO. Type make to build the scanner, or make help for the other commands
 # ARCH is the graphics card to build for. It gets saved to cuda/arch.txt so a plain make uses the same one next time.
 ARCH ?= $(shell cat cuda/arch.txt 2>/dev/null || echo sm_89)
+# CPU_ARCH is what the CPU code gets built for. native is this computer, something like CPU_ARCH=haswell builds for other ones too
+CPU_ARCH ?= native
 # cubiomes folder, the cubiomes objects we build, and the scanner headers
 CUB = vendor/cubiomes
 CUBIOMES = cuda/cubiomes_noise.o cuda/cubiomes_biomes.o cuda/cubiomes_layers.o cuda/cubiomes_biomenoise.o
@@ -22,7 +24,7 @@ help:
 	@echo "         START=<index>			...start a new range from this index instead"
 	@echo "         COUNT=<count>			...and end that range after this many indexes (needs START)"
 	@echo "         CUSTOM_SEED=<text>		...in your own stream (otherwise it uses the one saved in results/custom_seed.txt)"
-	@echo "         OPTIONS=\"...\"			...with scanner options (--min-sents, --min-arbitrations, --gate-rate, --cpu-gate, --cpu-assist, --gate-threads, --streams, --high-value, --all-hits, --plain-stream)"
+	@echo "         OPTIONS=\"...\"			...with scanner options (--min-sents, --min-arbitrations, --gate-rate, --cpu-gate, --cpu-assist, --gate-threads, --streams, --spread-cut, --score-log, --plain-stream)"
 	@echo "make log				Watch for new records as they come in (Ctrl+C just closes the log)"
 	@echo "         MIN_SENTS=<score>		...show every new hit with at least this SENTS score instead"
 	@echo "         MIN_ARBITRATIONS=<score>	...or at least this ARBITRATIONS score"
@@ -34,7 +36,7 @@ help:
 
 # The parts of cubiomes we use
 cuda/cubiomes_%.o: $(CUB)/%.c $(wildcard $(CUB)/*.h)
-	gcc -O3 -march=native -fwrapv -fPIC -c -o $@ $<
+	gcc -O3 -march=$(CPU_ARCH) -fwrapv -fPIC -c -o $@ $<
 
 # genlut makes the lookup table
 cuda/genlut: cuda/genlut.c $(CUBIOMES)
@@ -44,9 +46,9 @@ cuda/genlut: cuda/genlut.c $(CUBIOMES)
 cuda/lut263.bin: | cuda/genlut
 	cd cuda && ./genlut
 
-# CPU gate (-march=native turns on AVX-512 if your CPU has it)
+# CPU gate (-march=native turns on AVX-512 if your CPU has it, CPU_ARCH can pick something else)
 cuda/hostgate.o: cuda/hostgate.c cuda/hostgate.h
-	gcc -O3 -march=native -I$(CUB) -c -o $@ cuda/hostgate.c
+	gcc -O3 -march=$(CPU_ARCH) -I$(CUB) -c -o $@ cuda/hostgate.c
 
 # Rewrite arch.txt if ARCH changed (a new ARCH rebuilds the scanner)
 cuda/arch.txt: FORCE

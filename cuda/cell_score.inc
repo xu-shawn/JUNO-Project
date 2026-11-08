@@ -23,4 +23,5 @@ __constant__ double CELL_SCORE_WEIGHTS[128] = {
     0.86170894487, -0.636665277586, 4.35518516332, 0.148882198021, 0.135289458056, -1.37148107151,
     1.25229514846, -3.298827025};
 __constant__ double CELL_SCORE_BIAS = -177.101546544;
-__constant__ double CELL_SCORE_THRESHOLD = 0.464244195;
+// 0.4642 kept every known seed over SENTS 0.915. The hunt for the best seeds uses 2.0
+__constant__ double CELL_SCORE_THRESHOLD = 2.0;

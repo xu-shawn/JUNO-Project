@@ -10,4 +10,5 @@ __constant__ double TEMPERATURE_SCORE_WEIGHTS[49] = {
     1.87976442561, 6.63919728053, 6.66023980234, 5.21480370059, 2.89864258593, 1.19211228055,
     3.14359702116};
 __constant__ double TEMPERATURE_SCORE_BIAS = -190.545253278;
-__constant__ double TEMPERATURE_SCORE_THRESHOLD = 0.412684253136;
+// 0.4127 kept pretty much all of the seeds the humidity kernel would have kept. The hunt for the best seeds uses 2.0
+__constant__ double TEMPERATURE_SCORE_THRESHOLD = 2.0;

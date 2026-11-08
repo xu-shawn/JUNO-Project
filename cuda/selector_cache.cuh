@@ -115,14 +115,23 @@ DEV void shuffleShared(uint8_t *table, uint32_t *tableWords, XoroshiroState *ran
 
 // Threads in a block for the kernels that shuffle in the shared tables
 #define TABLE_THREADS 128
+#ifndef TABLE_BLOCKS
 #define TABLE_BLOCKS 3 // blocks on an SM at once
+#endif
 
 // The number of 64 bit words a build kernel saves for a seed (the corner slices of both halves, then the two headers)
 #define BUILT_WORDS(side) (2 * ((side) + 1) + 4)
 
-// Returns where a thread's table starts. Entry p is at p * 128 from there
+// Returns where a thread's table starts. Entry p is at p * 128 from there (entry p of the block's 128 tables is one 128 byte row,
+// so a warp's threads never share a bank). I also tried each thread keeping its own table in words and writing out the finished
+// entries four at a time (fewer stores), and in the real kernels it was a bit slower on both cards here
 DEV uint8_t *tableStart(uint32_t *tableWords) {
     return (uint8_t *) tableWords + (threadIdx.x & 31) * 4 + (threadIdx.x >> 5);
+}
+
+// Where entry p of a table is, from tableStart
+DEV uint32_t tableOffset(uint32_t p) {
+    return p * 128;
 }
 
 // Fills all of a block's tables with 0 to 255. All 128 threads have to call this
@@ -136,7 +145,7 @@ DEV void resetTables(uint32_t *tableWords) {
 
 // Entry position of a thread's table (the position wraps around at 256)
 DEV uint32_t tableEntry(const uint8_t *table, uint32_t position) {
-    return table[(position & 255) * 128];
+    return table[tableOffset(position & 255)];
 }
 
 // A xoroshiro generator in 32 bit halves, like shuffleShared keeps it
@@ -149,6 +158,7 @@ struct SplitRandom {
 
 // Returns the low 32 bits of xNextLong (all xNextInt needs)
 DEV uint32_t nextLowWord(SplitRandom &random) {
+    // (Doing the adds here as multiply-adds by a 1 the compiler can't see, so Turing runs them on its FMA pipe, was 2% slower there)
     uint64_t sum = ((uint64_t) random.lowHigh << 32 | random.lowLow) + ((uint64_t) random.highHigh << 32 | random.highLow);
     uint32_t result = __funnelshift_l((uint32_t) (sum >> 32), (uint32_t) sum, 17) + random.lowLow;
     uint32_t xorLow = random.lowLow ^ random.highLow;
@@ -161,6 +171,14 @@ DEV uint32_t nextLowWord(SplitRandom &random) {
     random.lowHigh = nextLowHigh;
     return result;
 }
+
+// The filters (temperature, humidity and probe) don't check whether xNextInt would have drawn again. That only happens in about one
+// shuffle in 290,000, and then the filter just sees a slightly different permutation for that seed. The cascade and the CPU check
+// always check. Build with -DEXACT_FILTER_SHUFFLES=1 to check here too
+#ifndef EXACT_FILTER_SHUFFLES
+#define EXACT_FILTER_SHUFFLES 0
+#endif
+
 
 /**
  * @brief Shuffles a thread's table the way Minecraft does, like shuffleShared
@@ -183,7 +201,9 @@ DEV void shuffleTable(uint8_t *table, XoroshiroState random) {
         for (int part = 0; part < 16; part++) {
             uint32_t bound = 256 - (i + part);
             uint32_t result = nextLowWord(split);
-            lowestProduct = min(lowestProduct, result * bound);
+            if (EXACT_FILTER_SHUFFLES) {
+                lowestProduct = min(lowestProduct, result * bound);
+            }
             // The entry to swap with
             uint8_t *other = row + multiplyHighAdd(result, bound, part) * 128;
             uint8_t temp = row[part * 128];
@@ -192,15 +212,15 @@ DEV void shuffleTable(uint8_t *table, XoroshiroState random) {
         }
     }
 
-    if (lowestProduct < 256) {
+    if (EXACT_FILTER_SHUFFLES && lowestProduct < 256) {
         for (int i = 0; i < 256; i++) {
-            table[i * 128] = (uint8_t) i;
+            table[tableOffset(i)] = (uint8_t) i;
         }
         for (int i = 0; i < 256; i++) {
             int j = xNextInt(&random, 256 - i) + i;
-            uint8_t temp = table[i * 128];
-            table[i * 128] = table[j * 128];
-            table[j * 128] = temp;
+            uint8_t temp = table[tableOffset(i)];
+            table[tableOffset(i)] = table[tableOffset(j)];
+            table[tableOffset(j)] = temp;
         }
     }
 }
@@ -312,37 +332,6 @@ DEV void readBuiltHalf(const uint64_t *built, int side, int half, uint64_t *slic
     header->yFade = __uint_as_float((uint32_t) (fractions >> 32));
 }
 
-// The rest of samplePerlinOctave, with two corner slices shifted down to the cell. nearZ is the slice at the cell's z and farZ
-// the next one
-DEV float sampleCorners(uint64_t nearZ, uint64_t farZ, float fractionX, float fractionY, float fractionZ, float fadeX, float fadeY, float fadeZ) {
-    uint32_t nearHashes = (uint32_t) nearZ;
-    uint32_t farHashes = (uint32_t) farZ;
-    float corner1 = gradientDot(nearHashes, fractionX, fractionY, fractionZ);
-    float corner2 = gradientDot(nearHashes >> 8, fractionX - 1, fractionY, fractionZ);
-    float corner3 = gradientDot(nearHashes >> 4, fractionX, fractionY - 1, fractionZ);
-    float corner4 = gradientDot(nearHashes >> 12, fractionX - 1, fractionY - 1, fractionZ);
-    float corner5 = gradientDot(farHashes, fractionX, fractionY, fractionZ - 1);
-    float corner6 = gradientDot(farHashes >> 8, fractionX - 1, fractionY, fractionZ - 1);
-    float corner7 = gradientDot(farHashes >> 4, fractionX, fractionY - 1, fractionZ - 1);
-    float corner8 = gradientDot(farHashes >> 12, fractionX - 1, fractionY - 1, fractionZ - 1);
-
-    corner1 = interpolate(fadeX, corner1, corner2);
-    corner3 = interpolate(fadeX, corner3, corner4);
-    corner5 = interpolate(fadeX, corner5, corner6);
-    corner7 = interpolate(fadeX, corner7, corner8);
-    corner1 = interpolate(fadeY, corner1, corner3);
-    corner5 = interpolate(fadeY, corner5, corner7);
-    return interpolate(fadeZ, corner1, corner5);
-}
-
-// The four numbers a row of samples needs from a lattice cell, collapseRowCell works them out
-struct RowCell {
-    float nearSlope;
-    float farSlope;
-    float nearConstant;
-    float farConstant;
-};
-
 // The gradient a hash picks, as x, y and z
 DEV void gradientVector(uint32_t hash, float *gradientX, float *gradientY, float *gradientZ) {
     hash &= 15;
@@ -356,7 +345,9 @@ DEV void gradientVector(uint32_t hash, float *gradientX, float *gradientY, float
     *gradientZ = secondIsY ? 0.0f : second;
 }
 
-// The gradients for the 16 hashes (the temperature kernel keeps a copy in shared memory)
+
+// The gradients for the 16 hashes (the kernels keep a copy in shared memory). Split into xy and z like this, a warp reading it never
+// has two threads on the same bank (a float4 table would)
 struct GradientTable {
     float2 xy[16];
     float z[16];
@@ -372,39 +363,103 @@ DEV void fillGradientTable(GradientTable *table) {
     }
 }
 
-// Boils a lattice cell down to the four numbers a row of samples needs (see RowCell). nearZ has the hashes of the corners at
-// the row's z, farZ the ones at z + 1, and cell is the cell's x in the slices
-DEV void collapseRowCell(uint32_t nearZ, uint32_t farZ, int cell, float fractionY, float fadeY, float fractionZ, float fadeZ, RowCell *result,
-                         const GradientTable *gradients) {
-    float slope[2], constant[2];
+// The gradients for the 16 hashes as (x, y, z, 0), for the kernels that sample from corner slices. uploadGradients fills it in
+__device__ float4 GRADIENTS[16];
+
+// Gets a gradient, from the copy in shared memory or straight from GRADIENTS
+template <bool SHARED>
+DEV float4 gradientOf(const GradientTable *sharedGradients, uint32_t hash) {
+    if (SHARED) {
+        float2 xy = sharedGradients->xy[hash];
+        return make_float4(xy.x, xy.y, sharedGradients->z[hash], 0.0f);
+    }
+    return __ldg(&GRADIENTS[hash]);
+}
+
+// The two numbers a row of samples needs from each lattice corner in x.
+// A sample a fraction t of the way across the cell between corners c and c + 1 is
+// interpolate(fade(t), slope[c] * t + constant[c], slope[c + 1] * (t - 1) + constant[c + 1])
+template <int SIDE>
+struct RowCorners {
+    float slope[SIDE + 1];
+    float constant[SIDE + 1];
+};
+
+/**
+ * @brief Works out the RowCorners of one row of the sample grid, for one half of an octave
+ * 
+ * @param slices The corner slices of the half (SIDE + 1 of them)
+ * @param startRow The first lattice cell in z the grid touches
+ * @param header The half's offsets and y fraction
+ * @param half 0 for the first Perlin noise, 1 for the second
+ * @param lacunarityExponent The octave's lacunarity is 2 to the minus this
+ * @param row The row of the grid
+ * @param sharedGradients The gradients in shared memory (if SHARED)
+ * @param corners Where they go
+ */
+template <int SIDE, bool SHARED>
+DEV void collapseRowCorners(const uint64_t *slices, uint32_t startRow, const HalfHeader &header, int half, int lacunarityExponent, int row,
+                            const GradientTable *sharedGradients, RowCorners<SIDE> &corners) {
+    uint32_t noise = header.offsetZ + (uint32_t) GRID_POSITIONS[half][lacunarityExponent][row];
+    int rowCell = (int) (uint8_t) ((noise >> 24) - startRow);
+    float fractionZ = fractionOf(noise);
+    float fadeZ = fade(fractionZ);
+    uint64_t nearZ = slices[0];
+    uint64_t farZ = slices[1];
+#pragma unroll
+    for (int z = 1; z < SIDE; z++) {
+        nearZ = rowCell == z ? slices[z] : nearZ;
+        farZ = rowCell == z ? slices[z + 1] : farZ;
+    }
+    const float fractionY = header.yFraction;
+    const float fadeY = header.yFade;
 
 #pragma unroll
-    for (int corner = 0; corner < 2; corner++) { // the x corners
+    for (int corner = 0; corner <= SIDE; corner++) {
         float zSlope[2], zConstant[2];
 #pragma unroll
-        for (int back = 0; back < 2; back++) { // the z corners
-            uint32_t slice = back ? farZ : nearZ;
-            uint32_t lowHash = (slice >> (8 * (cell + corner))) & 15;
-            uint32_t highHash = (slice >> (8 * (cell + corner) + 4)) & 15;
-            float2 lowXY = gradients->xy[lowHash];
-            float2 highXY = gradients->xy[highHash];
-            float lowZ = gradients->z[lowHash];
-            float highZ = gradients->z[highHash];
-
+        for (int back = 0; back < 2; back++) {
+            uint64_t slice = back ? farZ : nearZ;
+            float4 low = gradientOf<SHARED>(sharedGradients, (uint32_t) (slice >> (8 * corner)) & 15);
+            float4 high = gradientOf<SHARED>(sharedGradients, (uint32_t) (slice >> (8 * corner + 4)) & 15);
             float alongZ = back == 0 ? fractionZ : fractionZ - 1.0f;
-            zSlope[back] = interpolate(fadeY, lowXY.x, highXY.x);
-            float low = fmaf(lowZ, alongZ, lowXY.y * fractionY);
-            float high = fmaf(highZ, alongZ, highXY.y * (fractionY - 1.0f));
-            zConstant[back] = interpolate(fadeY, low, high);
+            zSlope[back] = interpolate(fadeY, low.x, high.x);
+            float lowValue = fmaf(low.z, alongZ, low.y * fractionY);
+            float highValue = fmaf(high.z, alongZ, high.y * (fractionY - 1.0f));
+            zConstant[back] = interpolate(fadeY, lowValue, highValue);
         }
-        slope[corner] = interpolate(fadeZ, zSlope[0], zSlope[1]);
-        constant[corner] = interpolate(fadeZ, zConstant[0], zConstant[1]);
+        corners.slope[corner] = interpolate(fadeZ, zSlope[0], zSlope[1]);
+        corners.constant[corner] = interpolate(fadeZ, zConstant[0], zConstant[1]);
     }
+}
 
-    result->nearSlope = slope[0];
-    result->farSlope = slope[1];
-    result->nearConstant = constant[0];
-    result->farConstant = constant[1];
+// The first lattice cell (counted from the grid's first one) that column of the grid can land in. It's either this one or the next,
+// depending on the offset. This is a constant once the loops are unrolled
+DEV int firstColumnCell(int half, int lacunarityExponent, int column) {
+    // Columns are 128 cells apart, the second half scales that by 337 / 331. In whole numbers so the compiler works it out
+    return half ? (column * 128 * 337) / (331 << lacunarityExponent) : (column * 128) >> lacunarityExponent;
+}
+
+/**
+ * @brief Samples one point of a row from its RowCorners
+ * 
+ * @param corners The row's corners
+ * @param firstCell firstColumnCell for the column
+ * @param cell The cell the point is in (firstCell or the one after)
+ * @param fraction How far across the cell the point is in x
+ * @param fadeX The fade of fraction
+ */
+template <int SIDE>
+DEV float sampleRowCorners(const RowCorners<SIDE> &corners, int firstCell, int cell, float fraction, float fadeX) {
+    const int far = firstCell + 2 <= SIDE ? firstCell + 2 : SIDE;
+    bool next = cell != firstCell;
+    float nearSlope = next ? corners.slope[firstCell + 1] : corners.slope[firstCell];
+    float nearConstant = next ? corners.constant[firstCell + 1] : corners.constant[firstCell];
+    float farSlope = next ? corners.slope[far] : corners.slope[firstCell + 1];
+    float farConstant = next ? corners.constant[far] : corners.constant[firstCell + 1];
+    float nearX = fmaf(nearSlope, fraction, nearConstant);
+    float farX = fmaf(farSlope, fraction - 1.0f, farConstant);
+    return interpolate(fadeX, nearX, farX);
 }
 
 // The fade, fraction and cell for the 9 columns (or rows) of the sample grid, worked out ahead of time

@@ -36,4 +36,5 @@ __constant__ double PROBE_SCORE_WEIGHTS[200] = {
     1.97340318087, 6.65793113059, 17.2868106793, 13.9305926095, 3.39460486532, 0.890583377106,
     -1.87424904179, -1.94890016124};
 __constant__ double PROBE_SCORE_BIAS = -292.320089598;
-__constant__ double PROBE_SCORE_THRESHOLD = 8.51870552;
+// The fit's cut was 8.5187 (for every hit from SENTS 0.905 up). The hunt for the best seeds uses 11
+__constant__ double PROBE_SCORE_THRESHOLD = 11.0;
